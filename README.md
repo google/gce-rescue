@@ -19,12 +19,12 @@ graph TD;
     E(3.3 Validate OS Version) --> G
     F(3.4 Create Rescue Disk) --> G
     G(4. Detach faulty boot disk) --> H
-    G(4. Detach faulty boot disk) --> J
-    H(5. Attach Rescue Disk as boot disk) --> I
-    I(6.1 Set Rescue Metadata) --> J
-    J(6.2 Start Instance) --> L
-    L(8. Attach faulty boot disk as secondary) -->M
-    M(9. Restore original Metadata)
+    G(4. Detach faulty boot disk) --> I
+    H(5.1 Attach Rescue Disk as boot disk) --> J
+    I(5.2 Set Rescue Metadata) --> J
+    J(6. Start Instance) --> L
+    L(7. Attach faulty boot disk as secondary) -->M
+    M(8. Restore original Metadata)
 
 ```
 
@@ -52,17 +52,17 @@ At this step we will try to validate what version of the operation system is bei
 ## 4. Detach faulty disk.
 Here we already identified the disk source and the deviceName and will detach from the instance, to attach later as secondary disk.
 
-## 5. Attach Rescue Disk as boot disk.
+## 5.1 Attach Rescue Disk as boot disk.
 The recently created disk (3.1) will be attached here as boot disk.
 
-## 6. Set Rescue Metadata.
+## 5.2 Set Rescue Metadata.
 As mentioned on the Backup Metadata (3.2) all existing custom metadata will be replaced by our startup-script. This is meant to be run at the first boot of the instance. The script will identify the faulty disk, as the correct partition, and mount on /mnt/sysimage.
 
-## 7. Start Instance.
+## 6. Start Instance.
 Start the instance with the rescue boot disk for the first time. This will run the startup-script that will be waiting for the faulty disk to be attached.
 
-## 8. Attach Faulty boot disk as secondary.
+## 7. Attach Faulty boot disk as secondary.
 Once the instance is running the faulty boot disk will be attached as secondary. This steps is done with the instance already up to avoid boot issues, such as we can find with partitions with the same UUID or when you are trying to rescue a Windows instance.
 
-## 9. Restore Original Metadata.
+## 8. Restore Original Metadata.
 Finally, at the end this script will restore the original custom metadata that existed on the instance before step 6. Good to keep in mind that the key "rescue-mode" will keep existing, until the script restore the instance to the original configuration.
