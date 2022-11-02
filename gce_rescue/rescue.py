@@ -1,329 +1,158 @@
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+""" Initilization Instance() with VM information. """
+
 from dataclasses import dataclass, field
-from typing import Callable, Dict
-import logging
+from typing import Dict, List, Union
 
-import googleapiclient.errors
-
-from gce_rescue.config import get_config
-from gce_rescue.utils import validate_instance_mode, wait_for_operation
-
-_logger = logging.getLogger(__name__)
-
-def get_instance_info(compute: Callable, instance: str, project_data: Dict[str, str]) -> Dict:
-    '''
-    Set Dictionary with complete data from instances().get() from the instance.
-    https://cloud.google.com/compute/docs/reference/rest/v1/instances/get
-
-    Attributes:
-        compute: obj, API Object
-        instance: str, Instace name
-        project_data: dict, Dictionary containing project and zone keys to be unpacked when calling the API.
-    '''
-    return compute.instances().get(
-        **project_data, 
-        instance = instance).execute()
+from gce_rescue.tasks.backup import backup_metadata_items
+from gce_rescue.tasks.disks import list_disk
+from gce_rescue.tasks.pre_validations import Validations
+from gce_rescue.utils import (
+  validate_instance_mode,
+  guess_guest,
+  get_instance_info
+)
+import googleapiclient.discovery
 
 @dataclass
-class InitInstance:
-    compute: Callable
-    project: str
-    zone: str
-    instance: str
-    instance_data: str = field(init=False)
-    ts: int = field(init=False)
-    _instance_status: str = ""
-    _rescue_source_disk: str = ""
-    _rescue_mode_status: Dict = field(default_factory=lambda: ({}))
+class Instance:
+  """Initialize instance."""
+  zone: str
+  name: str
+  project: str = None
+  test_mode: bool = field(default_factory=False)
+  compute: googleapiclient.discovery.Resource = field(init=False)
+  data: Dict[str, Union[str, int]] = field(init=False)
+  ts: int = field(init=False)
+  _status: str = ''
+  _rescue_source_disk: str = ''
+  _rescue_mode_status: Dict[str, Union[str, int]] = field(
+    default_factory=lambda: ({})
+  )
+  _disks: Dict[str, str] = field(default_factory=lambda: ({}))
+  _backup_items: Dict[str, Union[str, int]] = field(
+    default_factory=lambda: ([])
+  )
 
-    def __post_init__(self):
-        self.instance_data = get_instance_info(
-            compute = self.compute, 
-            instance = self.instance,
-            project_data = self.project_data)
+  def __post_init__(self):
+    check = Validations(
+        name=self.name,
+        test_mode=self.test_mode,
+        **self.project_data
+    )
+    self.compute = check.compute
+    self.project = check.adc_project
+    self.data = get_instance_info(
+        compute=self.compute,
+        name=self.name,
+        project_data=self.project_data)
 
-        self._rescue_mode_status = validate_instance_mode(self.instance_data)
-        self.ts = self._rescue_mode_status['ts']
+    self._rescue_mode_status = validate_instance_mode(self.data)
+    self.ts = self._rescue_mode_status['ts']
+    self._status = self.data['status']
+    self._rescue_source_disk = guess_guest(self.data)
+    self._disks = self._define_disks()
 
-        self._instance_status = self.instance_data["status"]
-        self._rescue_source_disk = get_config('source_guests')[0] # Using the Debian10 as default image.
+    # Backup metadata items
+    self._backup_items = backup_metadata_items(
+        data=self.data
+    )
 
-    @property
-    def rescue_mode_status(self) -> Dict:
-        return self._rescue_mode_status
+  def refresh_fingerprint(self) -> None:
+    """Refresh the current metadata fingerprint value."""
 
-    @property
-    def project_data(self) -> str:
-        return { 'project': self.project, 'zone': self.zone }
+    project_data = get_instance_info(
+        compute=self.compute,
+        name=self.name,
+        project_data=self.project_data)
 
-    @property
-    def rescue_disk(self) -> str:
-        return f"linux-rescue-disk-{self.ts}"
+    new_fingerprint = project_data['metadata']['fingerprint']
+    self.data['metadata']['fingerprint'] = new_fingerprint
 
-    @property
-    def instance_status(self) -> str:
-        return self._instance_status
+  def _define_disks(self) -> Dict[str, str]:
+    """Define the values of disk_name and device_name."""
 
-    @instance_status.setter
-    def instance_status(self, v: str) -> None:
-        self._instance_status = v
+    rescue_on = self._rescue_mode_status['rescue-mode']
+    if not rescue_on:
+      for disk in self.data['disks']:
+        if disk['boot']:
+          device_name = disk['deviceName']
+          source = disk['source']
+          disk_name = source.split('/')[-1]
 
-    @property
-    def rescue_source_disk(self) -> str:
-        return self._rescue_source_disk
+    else:
+      ts = self._rescue_mode_status['ts']
+      disk_filter = f'labels.rescue={ts}'
 
-    @rescue_source_disk.setter
-    def rescue_source_disk(self, v: str) -> None:
-        self._rescue_source_disk = v
+      disk = list_disk(
+        vm=self,
+        project_data=self.project_data,
+        label_filter=disk_filter
+      )
 
+      disk_name = disk[0]['name']
+      disks = self.data['disks']
+      for disk in disks:
+        full_source = disk['source']
+        source = full_source.split('/')[-1]
+        if disk_name == source:
+          device_name = disk['deviceName']
 
-    def _pre_validation(self) -> bool:
-        """
-        Pre validation check list before to continue:
-            a. IAM Permission list
-            b. Services enabled (compute.googleapis.com, storage.googleapis.com, etc.)
-
-        Returns:
-            a. True if its ok
-            b. raise execeptions for failed checks
-        """
-        pass
-
-
-def guess_guest(instance: InitInstance) -> str:
-    """
-    Determined which Guest OS Family is being used and select a different OS for recovery disk.
-    Default: projects/debian-cloud/global/images/family/debian-10
-    """
-    _guests = get_config("source_guests")
-    pass
-
-def start_instance(vm: InitInstance) -> Dict:
-    """
-    Start instance: https://cloud.google.com/compute/docs/reference/rest/v1/instances/start
-    Returns:
-        operation-result: Dict
-    """
-    _logger.info(f"Starting {vm.instance}...")
-
-    if vm.instance_status == "RUNNING":
-        _logger.info(f"{vm.instance} is already runnning.")
-        return {}
-    operation = vm.compute.instances().start(
-            **vm.project_data,
-            instance = vm.instance).execute()
-
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        vm.instance_status = "RUNNING"
-        return result
-
-    raise Exception(result)
-
-def stop_instance(vm: InitInstance) -> Dict:
-    """
-    Stop instance: https://cloud.google.com/compute/docs/reference/rest/v1/instances/stop
-    Returns:
-        operation-result: Dict
-    """
-    _logger.info(f"Stopping {vm.instance}...")
-
-    if vm.instance_status == "TERMINATED":
-        _logger.info(f"{vm} is already stopped.")
-        return {}
-    operation = vm.compute.instances().stop(
-            **vm.project_data,
-            instance = vm.instance).execute()
-
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        vm.instance_status = "TERMINATED"
-        return result
-
-    raise Exception(result)
-
-
-def backup(vm: InitInstance, disk: str) -> Dict:
-    """
-        a. Save the original status of instance_data. (where?)
-        b. Save original startup_script, if exists
-        c. Create a snaphost of the instance boot disk, adding self._ts to the disk name.
-           https://cloud.google.com/compute/docs/reference/rest/v1/disks/createSnapshot
-
-    Param:
-        disk: str, The failed disk name
-    Returns:
-        operation-result: Dict
-    """
-    
-    _snapshot_name = f"{disk}-{vm.ts}"
-    _snapshot_body = {
-        "name": _snapshot_name
+    result = {
+        'device_name': device_name,
+        'disk_name': disk_name
     }
+    return result
 
-    _logger.info(f"Creating snapshot {_snapshot_name}... ")
+  @property
+  def rescue_mode_status(self) -> Dict[str, Union[str, int]]:
+    return self._rescue_mode_status
 
-    operation = vm.compute.disks().createSnapshot(
-        **vm.project_data,
-        disk = disk,
-        body = _snapshot_body).execute()
+  @property
+  def project_data(self) -> str:
+    return {'project': self.project, 'zone': self.zone}
 
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        return result
+  @property
+  def rescue_disk(self) -> str:
+    return f'linux-rescue-disk-{self.ts}'
 
-    raise Exception(result)
+  @property
+  def status(self) -> str:
+    return self._status
 
-def set_metadata(vm: InitInstance, disk: str) -> Dict:
-    """
-    Configure Instance custom metadata.
-    https://cloud.google.com/compute/docs/reference/rest/v1/instances/setMetadata
-        a. Set rescue-mode=<ts unique id> if disable=False
-        b. Delete rescue-mode if disable=True
-        c. Replace startup-script with local startup-script.sh content.
+  @status.setter
+  def status(self, v: str) -> None:
+    self._status = v
 
-    Params:
-        disk: str, Device Name to be mounted as secundary disk under /mnt/sysroot
-    Returns:
-        operation-result: Dict
-    """
-    _startup_script_file = get_config("startup-script-file")
+  @property
+  def rescue_source_disk(self) -> str:
+    return self._rescue_source_disk
 
-    with open(_startup_script_file, "r") as file: 
-        _file_content = file.read()
-        _file_content = _file_content.replace("GOOGLE_DISK_NAME", disk)
+  @rescue_source_disk.setter
+  def rescue_source_disk(self, v: str) -> None:
+    self._rescue_source_disk = v
 
-    _metadata_body = {
-        'fingerprint': vm.instance_data['metadata']['fingerprint'],
-        'items': [
-            { 'key': 'startup-script', 'value': _file_content },
-            { 'key': 'rescue-mode', 'value': vm.ts }
-        ]
-    }
+  @property
+  def backup_items(self) -> List[str]:
+    return self._backup_items
 
-    _logger.info(f"Setting custom metadata...")
-    operation = vm.compute.instances().setMetadata(
-        **vm.project_data,
-        instance = vm.instance,
-        body = _metadata_body).execute()
+  @backup_items.setter
+  def backup_items(self, v: List[str]) -> None:
+    self._backup_items = v
 
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        return result
-
-    raise Exception(result)
-
-def create_rescue_disk(vm: InitInstance, source_disk: str) -> Dict:
-    """
-    Create new temporary rescue disk based on source_disk.
-    https://cloud.google.com/compute/docs/reference/rest/v1/disks/insert
-    Returns:
-        operation-result: Dict
-    """
-
-    chk_disk_exist = {}
-
-    try:
-        chk_disk_exist = vm.compute.disks().get(
-            **vm.project_data,
-            disk = vm.rescue_disk).execute()
-    except googleapiclient.errors.HttpError as e:
-        if e.status_code == 404:
-            _logger.info(f"Disk not found. Creating rescue disk {vm.rescue_disk}...")
-        else:
-            raise Exception(e)
-
-
-    if "name" in chk_disk_exist.keys():
-        if "users" in chk_disk_exist.keys():
-            raise Exception(f"Disk {vm.rescue_disk} is currently in use: {chk_disk_exist['users']}")
-
-        _logger.info(f"Disk {vm.rescue_disk} already exist. Skipping...")
-        return {}
-
-    disk_body = {
-        'name': vm.rescue_disk,
-        'sourceImage': source_disk,
-        'type': f"projects/{vm.project}/zones/{vm.zone}/diskTypes/pd-balanced"
-    }
-
-    operation = vm.compute.disks().insert(
-        **vm.project_data,
-        body = disk_body).execute()
-
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        return result
-
-    raise Exception(result)
-
-def delete_rescue_disk(vm: InitInstance, disk_name: str) -> Dict:
-    """
-    Delete rescue disk after resetting the instance to the original configuration.
-    https://cloud.google.com/compute/docs/reference/rest/v1/disks/delete
-    Param:
-        disk_name: str, Name of the disk to be deleted.
-    Returns:
-        operation-result: Dict
-    """
-
-    _logger.info(f"Deleting disk {disk_name}...")
-    operation = vm.compute.disks().delete(
-        **vm.project_data,
-        disk = disk_name).execute()
-
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == "DONE":
-        return result
-
-    raise Exception(result)
-
-
-def attach_disk(vm: InitInstance, disk_name: str, device_name: str, boot: bool = False) -> Dict:
-    """
-    Attach disk on the instance. By default (boot=False) it will attach as secundary
-    https://cloud.google.com/compute/docs/reference/rest/v1/instances/attachDisk
-    Returns:
-        operation-result: Dict
-    """
-    
-    attach_disk_body = {
-        "boot": boot,
-        "name": disk_name,
-        "deviceName": device_name,
-        "type": "PERSISTENT",
-        "source": f"projects/{vm.project}/zones/{vm.zone}/disks/{disk_name}"
-    }
-
-    _logger.info(f"Attaching disk {disk_name}...")
-    operation = vm.compute.instances().attachDisk(
-        **vm.project_data,
-        instance = vm.instance,
-        body = attach_disk_body).execute()
-
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        return result
-
-    raise Exception(result)
-  
-
-def detach_disk(vm: InitInstance, disk: str) -> Dict:
-    """
-    Detach disk from the instance.
-    https://cloud.google.com/compute/docs/reference/rest/v1/instances/detachDisk
-    Returns:
-        operation-result: Dict
-    """
-    
-    _logger.info(f"Detaching disk {disk} from {vm.instance}...")
-    operation = vm.compute.instances().detachDisk(
-        **vm.project_data,
-        instance = vm.instance,
-        deviceName = disk).execute()
-
-    result = wait_for_operation(vm, oper=operation)
-    if result["status"] == 'DONE':
-        return result
-
-    raise Exception(result)
-
+  @property
+  def disks(self) -> List[str]:
+    return self._disks

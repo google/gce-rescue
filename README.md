@@ -1,68 +1,83 @@
-# README GCE Rescue Mode 
-Authors:
-- halleysouza@google.com
-- runxin@google.com
+# GCE Rescue # 
 
-## This project aim to make easy to boot instances in rescue mode.
+The core idea is to make analogies to the steps taken to rescue a physical instance, where a rescue boot disk is plugged into the machine, changing the order of the boot disks and using the faulty disk as secondary.
 
-# Events flow.
+Once the user is in rescue mode, they can take the steps necessary to change/restore any configuration on the target disk. This script will attempt to automount the faulty disk in /mnt/sysroot.
 
-```mermaid
-graph TD;
-    A(1. Validations) --> B
-    B(2. Stop Instance) --> C
-    B(2. Stop Instance) --> D
-    B(2. Stop Instance) --> E
-    B(2. Stop Instance) --> F
-    C(3.1 Create Snapshot) --> G
-    D(3.2 Backup Metadata) --> G
-    E(3.3 Validate OS Version) --> G
-    F(3.4 Create Rescue Disk) --> G
-    G(4. Detach faulty boot disk) --> H
-    G(4. Detach faulty boot disk) --> I
-    H(5.1 Attach Rescue Disk as boot disk) --> J
-    I(5.2 Set Rescue Metadata) --> J
-    J(6. Start Instance) --> L
-    L(7. Attach faulty boot disk as secondary) -->M
-    M(8. Restore original Metadata)
+At the end, the user runs this script again to restore the configuration to boot from the original (now recovered) disk.
+
+The main advantage to using this approach, rather than creating a 2nd instance, is to make use of the resources already configured for the VM, such as networking, VPC firewalls and routes, policies, permissions, etc.
+
+> IMPORTANT: *This is not an officially supported Google product.*
+> Note that this is not an officially supported Google product, but a community effort. The Google Cloud Support team maintains this code and we do our best to avoid causing any problems in your projects, but we give no guarantees to that end.
+
+
+## Instalation ##
 
 ```
+$ git clone <repo url>
+$ cd gce-rescue/
+$ python3 -m pip install -r requirements.txt
+```
 
-# Events description.
+## Authentication ##
 
-## 1. Validations.
-This first step validate if the user has enough IAM permissions to perform all actions necessary to config the instance in rescue mode.
-Also, at this initial phase is also validate if the instance isn't already configured as rescue mode. This is done by checking if the custome metadata key "rescue-mode" exist with the timestamp as value.
+This script make use of ADC via gcloud to authenticate. Make sure you have gcloud installed and your ADC updated.
 
-## 2. Stop Instance.
-Simple try to stop the instance, if running to continue the necessary steps.
+```
+$ gcloud auth application-default login
+```
 
-### Note: Steps 3.X runs concurrently.
+## Usage ##
 
-## 3.1 Create Snapshot.
-Before continue with any modification a snapshot from the faulty boot disk will be taken, to guarantee that any modification made on the OS level can be rolled back.
+```
+$ ./gce-rescue.py --help
 
-## 3.2 Backup Metadata.
-This script rely on modifying some custom metadata, such as startup-script and adding a key called `rescue-mode` to identify this instance is configured as rescue mode. The value of the key `rescue-mode` should be the timestamp, same used for creating the rescue disk and the snapshot.
-Given the limit of 256kb for custom metadata, this script will replace all existing metadata, to be sure that will be enough to configure our startup-script.
+       USAGE: ./gce-rescue.py [flags]
+flags:
 
-## 3.3 Validate OS version.
-At this step we will try to validate what version of the operation system is being used. This will influence what OS will be used as rescue mode. This is due the fact that, when using the same image, the instance may have conflicts with the partitions having the same UUID.
+./gce-rescue.py:
+  --[no]debug: Print to the log file in debug level.
+    (default: 'false')
+  --[no]force: Don't ask for confirmation.
+    (default: 'false')
+  --instance: Instance name.
+  --project: The project-id that has the instance.
+  --zone: Zone where the instance is created.
+  
+Try --helpfull to get a list of all flags.
+```
 
-## 4. Detach faulty disk.
-Here we already identified the disk source and the deviceName and will detach from the instance, to attach later as secondary disk.
+- ### --zone ### 
+  - The instances zone. (REQUIRED)
+- ### --instance ###
+  - The instance name (not instance ID). (REQUIRED)
+- ### --project ###
+  - The project-id of the faulty instance. (OPTIONAL)
+- ### --force ###
+  - Do not ask for confirmation. It can be useful when running from a script.
+- ### --debug ###
+  - If provided, the log output will be set to DEBUG level. (OPTIONAL)
+  - The log file will be created on ./ containing the VM name and timestamp on the name, that can be used to help to troubleshoot failed executions as well as to manually recover the instance's original configuration, if necessary.
 
-## 5.1 Attach Rescue Disk as boot disk.
-The recently created disk (3.1) will be attached here as boot disk.
 
-## 5.2 Set Rescue Metadata.
-As mentioned on the Backup Metadata (3.2) all existing custom metadata will be replaced by our startup-script. This is meant to be run at the first boot of the instance. The script will identify the faulty disk, as the correct partition, and mount on /mnt/sysimage.
+> The log files contain important information about the initial state of the VM that may be required to manually restore it.
 
-## 6. Start Instance.
-Start the instance with the rescue boot disk for the first time. This will run the startup-script that will be waiting for the faulty disk to be attached.
 
-## 7. Attach Faulty boot disk as secondary.
-Once the instance is running the faulty boot disk will be attached as secondary. This steps is done with the instance already up to avoid boot issues, such as we can find with partitions with the same UUID or when you are trying to rescue a Windows instance.
+## Permissions ##
 
-## 8. Restore Original Metadata.
-Finally, at the end this script will restore the original custom metadata that existed on the instance before step 6. Good to keep in mind that the key "rescue-mode" will keep existing, until the script restore the instance to the original configuration.
+This is the list of the minimal IAM permissions required.
+
+| Description | Permissions|
+|----------:|----------|
+| Start and stop instance | compute.instances.stop <br/> compute.instances.start |
+| Create and remove disk | compute.instances.attachDisk on the instance <br/> compute.instances.detachDisk on the instance <br/> compute.images.useReadOnly on the image if creating a new root persistent disk <br/> compute.disks.use on the disk if attaching an existing disk in read/write mode  <br/> compute.disks.setLabels on the disk if setting labels |
+| Create snapshot | compute.snapshots.create on the project <br/> compute.disks.createSnapshot on the disk |
+| Configure metadata | compute.instances.setMetadata if setting metadata  <br/> compute.instances.setLabels on the instance if setting labels |
+
+
+## Contact ##
+gce-rescue-dev@google.com
+
+
+ 

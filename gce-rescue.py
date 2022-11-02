@@ -1,78 +1,87 @@
-import sys
-import logging
-import googleapiclient.discovery 
-from gce_rescue.rescue import InitInstance, attach_disk, backup, create_rescue_disk, delete_rescue_disk, detach_disk, set_metadata, start_instance, stop_instance
+#!/usr/bin/env python3
 
-# logging.basicConfig(level=logging.DEBUG)
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+""" Main script to be used to set/reset rescue mode. """
 
-def set_rescue_mode(vm: InitInstance, disk_name: str, device_name: str) -> None:
-    """
-    Set instance to boot as Rescue Mode.
-    This is like that just for tests purposes - please dont judge me (1)
-    """
-    print(1)
-    stop_instance(vm) # STOP INSTANCE
-    print(2)
-    backup(vm, disk=disk_name) # BACKUP
-    print(3)
-    create_rescue_disk(vm, source_disk=vm.rescue_source_disk) # CREATE RESCUE DISK
-    print(4)
-    detach_disk(vm, disk=device_name) # DETACH BOOT DISK
-    print(5)
-    attach_disk(vm, disk_name=vm.rescue_disk, device_name=vm.rescue_disk, boot=True) # ATTACH DISK RESCUE DISK (BOOT)
-    print(6)
-    set_metadata(vm, disk=device_name) # SET METADATA
-    print(7)
-    start_instance(vm) # START INSTANCE
-    print(8)
-    attach_disk(vm, disk_name=disk_name, device_name=device_name, boot=False) # ATTACH DISK (SECONDARY)
-    print("Done")
+from datetime import datetime
 
+from absl import app, flags, logging
+from gce_rescue import messages
+from gce_rescue.rescue import Instance
+from gce_rescue.tasks.actions import call_tasks
+from gce_rescue.utils import log_to_file, read_input
 
-def reset_rescue_mode(vm: InitInstance, disk_name: str, device_name: str) -> None:
-    """
-    Reset instance to the original boot mode.
-    This is like that just for tests purposes - please dont judge me (2)
-    """
-    print(1)
-    stop_instance(vm) # STOP INSTANCE
-    print(2)
-    detach_disk(vm, disk=vm.rescue_source_disk) # DETACH BOOT DISK
-    print(3)
-    detach_disk(vm, disk=device_name) # DETACH BOOT DISK (SECONDARY)
-    print(4)
-    attach_disk(vm, disk_name=disk_name, device_name=device_name, boot=True) # ATTACH DISK ORIGINAL DISK (BOOT)
-    print(5)
-    set_metadata(vm, disk=device_name) # RESET METADATA BACK
-    print(6)
-    start_instance(vm) # START INSTANCE
-    print(7)
-    delete_rescue_disk(vm, disk_name=vm.rescue_source_disk) # CLEAN UP UNUSED RESCUE DISK
-    print("Done")
+FLAGS = flags.FLAGS
+flags.DEFINE_string('project', None, 'The project-id that has the instance.')
+flags.DEFINE_string('zone', None, 'Zone where the instance is created.')
+flags.DEFINE_string('name', None, 'Instance name.')
+flags.DEFINE_boolean('debug', False, 'Print to the log file in debug level.')
+flags.DEFINE_boolean('force', False, 'Don\'t ask for confirmation.')
+flags.mark_flag_as_required('zone')
+flags.mark_flag_as_required('name')
 
 
 def main(argv):
-    # TODO: Some argv here
-    # Initiate the Goolge API Client Discovery API.
-    compute = googleapiclient.discovery.build('compute', 'v1')
+  del argv
 
-    # For tests purposes...
-    vm_rescue = InitInstance(
-        compute = compute,
-        project = "gce-rescue-mode",
-        zone = "europe-central2-a",
-        instance = "test"
-    )
+  if FLAGS.debug:
+    log_level = 'DEBUG'
+  else:
+    log_level = 'INFO'
+  log_to_file(log_file_name=FLAGS.name, level=log_level)
 
-    for disk in vm_rescue.instance_data["disks"]:
-        if disk["boot"] == True:
-            device_name = disk["deviceName"]
-            source = disk["source"]  
-            disk_name = source.split("/")[-1] # Ie: https://www.googleapis.com/compute/v1/projects/gce-rescue-mode/zones/europe-central2-a/disks/linux
+  parse_kwargs = {
+      'zone': FLAGS.zone,
+      'name': FLAGS.name,
+  }
 
-    set_rescue_mode(vm_rescue, disk_name=disk_name, device_name=device_name)
-            
+  if FLAGS.project:
+    parse_kwargs['project'] = FLAGS.project
+
+  vm = Instance(test_mode=False, **parse_kwargs)
+  rescue_on = vm.rescue_mode_status['rescue-mode']
+  if not rescue_on:
+    if not FLAGS.force:
+      info = (f'This option will boot the instance {vm.name} in '
+              'RESCUE MODE. \nIf your instance is running it will be rebooted. '
+              '\nDo you want to continue [y/N]: ')
+      read_input(msg=info)
+
+    print('Starting...')
+    # save in the log file current configuration of the VM as backup.
+    logging.info('RESTORE#%s\n', vm.data)
+    action = 'set_rescue_mode'
+    msg = messages.tip_connect_ssh(vm)
+
+  else:
+    rescue_ts = vm.rescue_mode_status['ts']
+    rescue_date = datetime.fromtimestamp(int(rescue_ts))
+
+    if not FLAGS.force:
+      info = (f'The instance \"{vm.name}\" is currently configured '
+              f'to boot as rescue mode since {rescue_date}.\nWould you like to'
+              ' restore the original configuration ? [y/N]: ')
+      read_input(msg=info)
+
+    print('Restoring VM...')
+    action = 'reset_rescue_mode'
+    msg = messages.tip_restore_disk(vm)
+
+  call_tasks(vm=vm, action=action)
+  print(msg)
 
 if __name__ == '__main__':
-    main(sys.argv)
+  app.run(main)
