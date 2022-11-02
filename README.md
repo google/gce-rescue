@@ -41,7 +41,7 @@ flags:
     (default: 'false')
   --[no]force: Don't ask for confirmation.
     (default: 'false')
-  --instance: Instance name.
+  --name: Instance name.
   --project: The project-id that has the instance.
   --zone: Zone where the instance is created.
   
@@ -50,7 +50,7 @@ Try --helpfull to get a list of all flags.
 
 - ### --zone ### 
   - The instances zone. (REQUIRED)
-- ### --instance ###
+- ### --name ###
   - The instance name (not instance ID). (REQUIRED)
 - ### --project ###
   - The project-id of the faulty instance. (OPTIONAL)
