@@ -17,7 +17,9 @@ import googleapiclient.discovery
 import google.auth
 import sys
 from gce_rescue.test.mocks import mock_api_object
+
 PROJECT = ''
+
 def _get_auth():
   global PROJECT
   try:
@@ -33,6 +35,7 @@ def _get_auth():
     msg = _info_auth_cred()
     print(msg, file=sys.stderr)
     sys.exit(1)
+
 def authenticate_check(
   zone: str,
   instance_name: str,
@@ -63,19 +66,23 @@ def authenticate_check(
     msg = _info_auth_refresh()
     print(msg, file=sys.stderr)
     sys.exit(1)
+
 def project_name() -> str:
   return PROJECT
+
 def _info_auth_refresh() -> str:
   return (
 	'    Please use application-default Credentials (ADC) to authenticate:\n'
 	'    $ gcloud auth login --update-adc'
   )
+
 def _info_auth_cred() -> str:
   return (
 	'    Please use application-default Credentions (ADC) to authenticate:\n'
 	'     $ gcloud auth application-default login\n'
 	f'     $ gcloud auth application-default set-quota-project {PROJECT}'
   )
+
 def _info_no_project() -> str:
   return (
 	'    Was not possible to find the project where the VM is created.\n'

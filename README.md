@@ -1,39 +1,66 @@
-# GCE Rescue # 
-
-The core idea is to make analogies to the steps taken to rescue a physical instance, where a rescue boot disk is plugged into the machine, changing the order of the boot disks and using the faulty disk as secondary.
-
-Once the user is in rescue mode, they can take the steps necessary to change/restore any configuration on the target disk. This script will attempt to automount the faulty disk in /mnt/sysroot.
-
-At the end, the user runs this script again to restore the configuration to boot from the original (now recovered) disk.
-
-The main advantage to using this approach, rather than creating a 2nd instance, is to make use of the resources already configured for the VM, such as networking, VPC firewalls and routes, policies, permissions, etc.
-
-> IMPORTANT: *This is not an officially supported Google product.*
-> Note that this is not an officially supported Google product, but a community effort. The Google Cloud Support team maintains this code and we do our best to avoid causing any problems in your projects, but we give no guarantees to that end.
+# GCE Rescue #
+[![test badge](https://github.com/GoogleCloudPlatform/gce-rescue/actions/workflows/test.yml/badge.svg?branch=main&event=push)](https://github.com/GoogleCloudPlatform/gce-rescue/actions/workflows/test.yml?query=branch%3Amain+event%3Apush)
 
 
-## Instalation ##
+This page shows you how to rescue a virtual machine (VM) instance by using GCE Rescue. 
+
+With GCE Rescue, you can boot the VM instance using a temporary boot disk to fix any problem that may be stopping the VM instance. Specifically, GCE Rescue uses a temporary Linux image as the VM instance’s boot disk to let you do maintenance on the faulty boot disk while it is in rescue mode.
+
+When running GCE Rescue, it creates a snapshot of the existing boot disk for backup. 
+
+After you’ve fixed the faulty disk, you can then restore the original configuration by running GCE Rescue again to reboot the VM instance in normal mode again.
+
+The advantage of using GCE Rescue is that it uses the resources already configured on the VM instance, such as networking, VPC firewalls or routes, to restore the faulty boot disk instead of creating a duplicate VM instance to restore the faulty boot disk. 
+
+>Note: **`GCE Rescue is not an officially supported Google Cloud product`**. The Google Cloud Support team maintains this repository, but the product is experimental and, therefore, it can be unstable.
+
+
+## Installation ##
+
+
+To install GCE Rescue, follow these steps:
+
+1. Clone the git repository to your local machine:
+
+``` 
+$ git clone https://github.com/GoogleCloudPlatform/gce-rescue.git
+```
+
+2. Navigate to the `cd/gce-rescue` folder:
 
 ```
-$ git clone <repo url>
 $ cd gce-rescue/
-$ python3 -m pip install -r requirements.txt
 ```
 
-## Authentication ##
+3. To install GCE Rescue, select one of the following options: 
 
-This script make use of ADC via gcloud to authenticate. Make sure you have gcloud installed and your ADC updated.
+* Install GCE Rescue globally.
+
+``` 
+$ sudo python3 setup.py install
+```
+
+* Install GCE Rescue locally.
 
 ```
-$ gcloud auth application-default login
+$ python3 setup.py install --user
 ```
+
+> Note: If you cannot find the gce-rescue executable after your install 
+GCE Rescue, add the Python Library to your PATH:
+>
+```
+$ export PATH=$PATH:$(python3 -m site --user-base)/bin
+```
+
+---
 
 ## Usage ##
 
 ```
-$ ./gce-rescue.py --help
+$ gce-rescue --help
 
-       USAGE: ./gce-rescue.py [flags]
+       USAGE: gce-rescue [flags]
 flags:
 
 ./gce-rescue.py:
@@ -61,8 +88,102 @@ Try --helpfull to get a list of all flags.
   - The log file will be created on ./ containing the VM name and timestamp on the name, that can be used to help to troubleshoot failed executions as well as to manually recover the instance's original configuration, if necessary.
 
 
-> The log files contain important information about the initial state of the VM that may be required to manually restore it.
+> The log files contain important information about the initial state of the VM instance that may be required to manually restore it.
 
+---
+
+## Examples ##
+
+```shellscript
+$ gce-rescue --zone europe-central2-a --name test
+
+This option will boot the instance test in RESCUE MODE.
+If your instance is running it will be rebooted.
+Do you want to continue [y/N]: y
+Starting...
+- Configuring...
+ \- Progress 6/6 [█████████████████████████████████████████████████████████████]
+- Configurations finished.
+- Your instance is READY! You can now connect your instance "test" via:
+  1. CLI. (add --tunnel-through-iap if necessary)
+    $ gcloud compute ssh test --zone=europe-central2-a --project=my-project --ssh-flag="-o StrictHostKeyChecking=no"
+  OR
+  2. Google Cloud Console:
+    https://ssh.cloud.google.com/v2/ssh/projects/my-project/zones/europe-central2-a/instances/test?authuser=0&hl=en_US&useAdminProxy=true&troubleshoot4005Enabled=true&troubleshoot255Enabled=true&sshTroubleshootingToolEnabled=true
+
+```
+
+Once your VM instance is in rescue mode you can connect via SSH, as you normally would do.
+
+Notice that `-rescue` was added to your hostname, to highlight that you are currently in rescue mode.
+
+The original boot disk should be automatically mounted on `/mnt/sysroot`:
+
+```shellscript
+user@test-rescue:~$ lsblk
+NAME    MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+sda       8:0    0   10G  0 disk
+├─sda1    8:1    0  9.9G  0 part /
+├─sda14   8:14   0    3M  0 part
+└─sda15   8:15   0  124M  0 part /boot/efi
+sdb       8:16   0   30G  0 disk
+├─sdb1    8:17   0    2M  0 part
+├─sdb2    8:18   0   20M  0 part
+└─sdb3    8:19   0   30G  0 part /mnt/sysroot
+
+user@test-rescue:~$ chroot /mnt/sysroot
+```
+
+At this point you should take the necessary actions to restore your faulty boot disk.
+
+When finished you can close your SSH connections and restore the VM instance to the original mode, by running the same command again:
+
+```shellscript
+$ gce-rescue --zone europe-central2-a --name test
+
+The instance "test" is currently configured to boot as rescue mode since 2022-11-01 12:05:08.
+Would you like to restore the original configuration ? [y/N]: y
+Restoring VM...
+- Configuring...
+ \- Progress 4/4 [█████████████████████████████████████████████████████████████]
+- Configurations finished.
+- The instance test was restored! Use the snapshot below if you need to restore the modification made while the instance was in rescue mode.
+ Snapshot name: test-1668009968
+ More information: https://cloud.google.com/compute/docs/disks/restore-snapshot
+
+```
+
+> A snapshot was taken before setting the instance in Rescue Mode and can be used to recover the disk status.
+You will be able to idenfiy the snapshot name, like in the example above is: `test-1668009968`.
+
+#
+# You are ready !
+
+When you connect again you will noticed the your instance is back to the normal mode:
+
+```shellscript
+user@test:~> uptime
+ 12:24:18  up   0:05,  1 user,  load average: 0.00, 0.00, 0.00
+
+user@test:~> lsblk
+NAME   MAJ:MIN RM SIZE RO TYPE MOUNTPOINTS
+sda      8:0    0  30G  0 disk
+├─sda1   8:1    0   2M  0 part
+├─sda2   8:2    0  20M  0 part /boot/efi
+└─sda3   8:3    0  30G  0 part /
+
+user@test:~>
+```
+
+---
+
+## Authentication ##
+
+This script makes use of Application Default Credentials (ADC). Make sure you have gcloud installed and your ADC updated.
+
+You can find more information on: https://cloud.google.com/docs/authentication/provide-credentials-adc
+
+----
 
 ## Permissions ##
 
@@ -75,9 +196,9 @@ This is the list of the minimal IAM permissions required.
 | Create snapshot | compute.snapshots.create on the project <br/> compute.disks.createSnapshot on the disk |
 | Configure metadata | compute.instances.setMetadata if setting metadata  <br/> compute.instances.setLabels on the instance if setting labels |
 
+----
 
 ## Contact ##
+
+### GCE Rescue Team ###
 gce-rescue-dev@google.com
-
-
- 
